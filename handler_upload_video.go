@@ -81,12 +81,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err = temp.Seek(0, io.SeekStart)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to seek to start of video file", err)
-		return
-	}
-
 	ratio, err := getVideoAspectRatio(temp.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to get video aspect ratio", err)
@@ -101,6 +95,24 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		prefix = "portrait"
 	}
 
+	processedFilePath, err := processVideoForFastStart(temp.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to process video for fast start", err)
+		return
+	}
+
+	processedVideo, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to open processed video", err)
+		return
+	}
+
+	_, err = processedVideo.Seek(0, io.SeekStart)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to seek to start of video file", err)
+		return
+	}
+
 	var randomBytes []byte = make([]byte, 32)
 	rand.Read(randomBytes)
 	randomString := base64.RawURLEncoding.EncodeToString(randomBytes)
@@ -110,18 +122,24 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(key),
 		ContentType: aws.String(mediaType),
-		Body:        temp,
+		Body:        processedVideo,
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Uploading to s3 failed", err)
 		return
 	}
 
-	videoUrl := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, key)
+	videoUrl := fmt.Sprintf("%s,%s", cfg.s3Bucket, key)
 	video.VideoURL = &videoUrl
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to update db", err)
+		return
+	}
+
+	video, err = cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to get presigned url", err)
 		return
 	}
 
